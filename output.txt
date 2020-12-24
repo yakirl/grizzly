@@ -1,0 +1,6 @@
+21:09:23
+Spawning workers...
+Filling work queue...
+scanning Subnet 192.168.1.147/24
+scanning Subnet 172.17.0.1/16
+finished sending jobs
