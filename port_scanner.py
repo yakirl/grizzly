@@ -9,11 +9,16 @@ import socket
 from scapy.all import *
 
 
+OUTPUT_FILE = "scanner.log"
+# 0 - INFO, 1 - DEBUG
+LOG_LVL = 0
 
-def output(msg):
-    msg += "\n"
+def output(msg, lvl=0):
+    if lvl > LOG_LVL:
+        return
     print(msg)
-    with open("output.txt", "a") as f:
+    msg += "\n"
+    with open(OUTPUT_FILE, "a") as f:
         f.write(msg)
 
 class PortType:
@@ -26,17 +31,20 @@ Object for one-time scan
     According to defined rules (follow nmap behavior)
 '''
 class IPScanner(object):
-    NUM_WORKERS = 10
-    TIMEOUT = 3
+    NUM_WORKERS = 30
+    TIMEOUT = 2
     ICMP_TIMESTAMP_REQUEST_TRUNCATED = bytes.fromhex('0d00f2ff00000000')
     PORTS = []
+    LOOPBACK = '127.0.0.1'
+    EXCLUDE_INTERFACES = ['docker0']
+    UDP_SCAN = True
 
     def __init__(self):
         self.work_queue = queue.Queue()
         self.set_ports_to_scan()
         self.ip_to_open_ports = {}
         self.terminate = False
-        with open("output.txt", "w") as f:
+        with open(OUTPUT_FILE, "w") as f:
             f.write(datetime.now().strftime("%H:%M:%S") + "\n")
 
     def set_ports_to_scan(self):
@@ -54,8 +62,8 @@ class IPScanner(object):
     '''
     @staticmethod
     def check_host_responsive(host_ip):
-        print("Checking if host %s is responsive" % host_ip)
-        ans,unans=srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=host_ip), timeout=IPScanner.TIMEOUT)
+        output("Checking if host %s is responsive" % host_ip, lvl=1)
+        ans,unans=srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=host_ip), timeout=IPScanner.TIMEOUT, verbose=0)
         if len(ans) > 0 and ans[0][1].psrc == host_ip:
             return True
         p = sr1(IP(dst=host_ip)/ICMP()/"XXXXXX", timeout=IPScanner.TIMEOUT, verbose=0)
@@ -99,8 +107,9 @@ class IPScanner(object):
         for port in IPScanner.PORTS:
             if IPScanner.check_open_tcp_port(ip, port):
                 open_ports.append((PortType.TCP, port))
-            if IPScanner.check_open_udp_port(ip, port):
-                open_ports.append((PortType.UDP, port))
+            if IPScanner.UDP_SCAN:
+                if IPScanner.check_open_udp_port(ip, port):
+                    open_ports.append((PortType.UDP, port))
         return open_ports
 
     def scan_host(self):
@@ -117,7 +126,7 @@ class IPScanner(object):
                         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                             res = sock.connect_ex(('localhost', port))
                             if res == 0:
-                                output("localhost port %s" % port)
+                                output("localhost port %s is open" % port)
                                 self.ip_to_open_ports[ip].append((PortType.TCP, port))
                     continue
                 elif not IPScanner.check_host_responsive(ip):
@@ -141,9 +150,11 @@ class IPScanner(object):
         if_addrs = psutil.net_if_addrs()
 
         for interface in if_addrs.keys():
+            if interface in IPScanner.EXCLUDE_INTERFACES:
+                continue
             for addr in if_addrs[interface]:
                 try:
-                    if addr.address == '127.0.0.1':
+                    if addr.address == IPScanner.LOOPBACK:
                         continue
                     # check valid IPv4 address and mask
                     ip_valid = re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$",addr.address)
@@ -158,6 +169,7 @@ class IPScanner(object):
         return addr_cidrs
 
     def report(self):
+        output("*** Report ***")
         for ip in self.ip_to_open_ports.keys():
             output("Open ports for IP %s:" % ip)
             for (port_type, port) in self.ip_to_open_ports[ip]:
@@ -176,11 +188,12 @@ class IPScanner(object):
            threads.append(t)
 
         output("Filling work queue...")
+        self.work_queue.put(IPScanner.LOOPBACK)
         for addr_cidr in addr_cidrs:
             output("scanning Subnet %s" % addr_cidr)
             ip_list = list(IPNetwork(addr_cidr))
             for ip in ip_list:
-                self.work_queue.put(ip)
+                self.work_queue.put(ip.format())
 
         output("finished sending jobs")
         while True:

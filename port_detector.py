@@ -2,13 +2,20 @@ import datetime
 from netaddr import *
 import threading
 from scapy.all import *
+import time
 
+# this states how long the service runs. can stop with signal anytime
+RUN_DURATION = 60 * 10
+OUTPUT_FILE = "detector.log"
+# 0 - INFO, 1 - DEBUG
+LOG_LVL = 0
 
-
-def output(msg):
-    msg += "\n"
+def output(msg, lvl=0):
+    if lvl > LOG_LVL:
+        return
     print(msg)
-    with open("output.txt", "a") as f:
+    msg += "\n"
+    with open(OUTPUT_FILE, "a") as f:
         f.write(msg)
 
 
@@ -50,7 +57,7 @@ PortDetector
 '''
 
 class PortDetector(object):
-    INTERVAL = 60
+    INTERVAL = 30
     SNIFF_PERIOD = 10
     BUFFER_SIZE = 1024
     ATTACK_INTERVAL = 2
@@ -70,7 +77,7 @@ class PortDetector(object):
         }
         self.ip = [x[4] for x in conf.route.routes if x[2] != '0.0.0.0' and x[3]==conf.iface][0]
         self.mac = get_if_hwaddr(conf.iface)
-        with open("output.txt", "w") as f:
+        with open(OUTPUT_FILE, "w") as f:
             f.write(datetime.now().strftime("%H:%M:%S") + "\n")
 
     def calc_stream_avg(self, pkt_list):
@@ -96,7 +103,7 @@ class PortDetector(object):
 
         for ip in ip_to_pkts.keys():
             if self.is_high_activity(ip_to_pkts[ip]):
-                self.attacks.append(Attack(AttackType.TCP_SYN, datetime.now(), {"ip": ip}))
+                self.attacks.append(Attack(AttackType.TCP_SYN, datetime.now(), {"src_ip": ip}))
 
     def tcp_syn_ack_analyze(self):
         packets = [pkt for pkt in self.detector_data[AttackType.TCP_SYN_ACK].packets if IP in pkt and pkt[IP].src != self.ip]
@@ -119,11 +126,12 @@ class PortDetector(object):
             self.attacks.append(Attack(AttackType.ICMP_POD, datetime.now()))
 
     def report(self):
-        if self.attacks != []:
-            output("Found attacks:")
+        if self.attacks == []:
+            output("No attacks detected")
+            return
+        output("Found attacks:")
         for attack in self.attacks:
             output("%s: %s. %s" % (attack.time, attack.type, attack.data))
-        output("-------- ")
 
     def stop(self):
         self._stop = True
@@ -149,7 +157,7 @@ class PortDetector(object):
 
     def detect(self):
         threads = []
-        output("Spawning sniffers...")
+        output("Spawning detectors...")
         for detector in self.detector_data.keys():
            t = threading.Thread(target = self.sniff, args=(detector,))
            t.daemon = True
@@ -158,7 +166,7 @@ class PortDetector(object):
         output("Spawn done. waiting to finish...")
         for t in threads:
             t.join()
-        output("detectors joined")
+        output("detectors joined. Analyzing data...")
         self.analyze_data()
         self.report()
         self.attacks = []
@@ -171,6 +179,7 @@ class PortDetector(object):
             self.detect()
             duration = time.time() - start_time
             output("took %d seconds" % duration)
+            output("-+-+-+-+-+-+-+----- ")
             sleep_time = PortDetector.INTERVAL - duration
             if sleep_time > 0:
                 time.sleep(sleep_time)
@@ -181,9 +190,13 @@ def main():
     detector = PortDetector()
     t = threading.Thread(target = detector.start)
     t.daemon = True
-    t.start()
-    time.sleep(PortDetector.INTERVAL*8)
-    detector.stop()
+    try:
+        t.start()
+        time.sleep(RUN_DURATION)
+    except:
+        detector.stop()
+        t.join()
+        pass
 
 if "__main__" == __name__:
     main()
